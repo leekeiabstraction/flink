@@ -1,0 +1,80 @@
+# Session cluster (JM + 1 long-lived TM) to reproduce the
+# ColumnFamilyHandle.getDescriptor() native leak in Compactor.compact().
+#
+# KEY POINT: this is a *session* cluster. The TaskManager process survives across
+# job submit/cancel cycles, so the leaked native ColumnFamilyOptions (which pin the
+# old block caches' shared_ptr) accumulate in ONE address space -> RSS climbs.
+# A per-job cluster would free everything on each cycle and NEVER reproduce this.
+#
+# Swap `flink:1.20` -> `flink:2.0` to match a 2.0-based prod build; leak code is identical.
+
+x-flink-props: &flink_props |
+  FLINK_PROPERTIES=
+  jobmanager.rpc.address: jobmanager
+  rest.address: jobmanager
+  taskmanager.numberOfTaskSlots: 1
+  parallelism.default: 1
+  taskmanager.memory.process.size: 4096m
+  jobmanager.memory.process.size: 2048m
+  # managed memory left unset on purpose -> sized by taskmanager.memory.managed.fraction
+  # (default 0.4 of Flink total memory). RocksDB block cache scales with the 4g TM.
+
+  # ---- state backend: must be rocksdb (sstmerge lives in flink-statebackend-rocksdb) ----
+  state.backend.type: rocksdb
+
+  # ---- Gate 1: shrink everything ~1000x so small SSTs reach L1+ in seconds ----
+  state.backend.rocksdb.compaction.style: LEVEL
+  state.backend.rocksdb.compaction.level.use-dynamic-size: false
+  state.backend.rocksdb.writebuffer.size: 64kb
+  state.backend.rocksdb.writebuffer.count: 2
+  state.backend.rocksdb.writebuffer.number-to-merge: 1
+  state.backend.rocksdb.compaction.level.target-file-size-base: 64kb
+  # Larger L1 budget so L0->L1 keeps producing tiny 64kb files but L1->L2 auto-compaction
+  # backs off, leaving small settled non-overlapping L1 files for the manual compactor to
+  # merge SUCCESSFULLY (the FLINK-26050 condition). The previous 256kb made auto-compaction
+  # churn L1 and steal files first -> manual compactions failed "currently being compacted".
+  state.backend.rocksdb.compaction.level.max-size-level-base: 1mb
+
+  # ---- Gate 2: fire manual compaction (= Compactor.compact = the leak) ----
+  # min-interval MUST be > 0 (0 disables the whole feature -> zero leak).
+  # 5s = production-like cadence (RocksDBManualCompactionConfig notes prod=10s).
+  state.backend.rocksdb.manual-compaction.min-interval: 5s
+  state.backend.rocksdb.manual-compaction.min-files-to-compact: 2
+  # default 50k would EXCLUDE our ~64kb files; bump it so they qualify.
+  state.backend.rocksdb.manual-compaction.max-file-size-to-compact: 1mb
+  state.backend.rocksdb.manual-compaction.max-output-file-size: 256kb
+  state.backend.rocksdb.manual-compaction.max-files-to-compact: 4
+  state.backend.rocksdb.manual-compaction.max-auto-compactions: 1000
+
+  # ---- confirming signal: live block-cache usage stays bounded while RSS grows ----
+  state.backend.rocksdb.metrics.block-cache-usage: true
+  state.backend.rocksdb.metrics.block-cache-capacity: true
+  state.backend.rocksdb.metrics.num-running-compactions: true
+
+services:
+  jobmanager:
+    image: flink:1.20
+    ports:
+      - "8081:8081"
+    command: jobmanager
+    environment:
+      - *flink_props
+    volumes:
+      - ./job.sql:/opt/sql/job.sql:ro
+    # Hard container limit == Flink jobmanager.memory.process.size. memswap_limit==mem_limit
+    # disables swap so exceeding RSS triggers a real OOMKill (exit 137) instead of swapping.
+    mem_limit: 2048m
+    memswap_limit: 2048m
+
+  taskmanager:
+    image: flink:1.20
+    depends_on:
+      - jobmanager
+    command: taskmanager
+    environment:
+      - *flink_props
+    # Hard container limit == Flink taskmanager.memory.process.size (4g). When the native
+    # descriptor leak pushes RSS past 4g, Docker OOMKills the container (exit 137) -- the
+    # leak signal. memswap_limit==mem_limit disables swap so it's a hard kill, not slow swap.
+    mem_limit: 4096m
+    memswap_limit: 4096m
