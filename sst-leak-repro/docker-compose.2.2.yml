@@ -1,0 +1,8 @@
+# Override to run the same repro on Flink 2.2 instead of 1.20.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.2.2.yml up -d
+# Everything else (FLINK_PROPERTIES, mem limits, volumes) is inherited from the base file.
+services:
+  jobmanager:
+    image: flink:2.2
+  taskmanager:
+    image: flink:2.2

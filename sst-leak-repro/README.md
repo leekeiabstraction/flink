@@ -33,6 +33,16 @@ Watch live in another terminal:
 watch -n2 'docker stats --no-stream --format "{{.Name}} {{.MemUsage}}"'
 ```
 
+### Other Flink versions
+The leak is unfixed across releases. To run on Flink 2.2 instead of the default 1.20, add the
+override file (swaps only the image, reuses all the tuned config):
+```bash
+docker compose -f docker-compose.yml -f docker-compose.2.2.yml up -d
+```
+Verified identical behavior on **1.20.4** and **2.2.1**: idle RSS never returns to baseline after
+cancel, and a final generation drives the TaskManager to OOMKill (exit 137). The leaking code is
+the same, only the package moved (`contrib.streaming.state.sstmerge` -> `state.rocksdb.sstmerge`).
+
 ## What you should see
 - **Buggy image (stock):** TaskManager `MEM USAGE` ratchets up every cycle and does not return
   to baseline after cancel — it keeps climbing past the 512m managed-memory budget.
