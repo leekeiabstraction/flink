@@ -1,0 +1,66 @@
+services:
+  jobmanager:
+    image: ${FLINK_IMAGE:-flink:2.2.1-java21}
+    container_name: stats-leak-jm
+    ports:
+      - "${WEB_UI_PORT:-8086}:8081"
+    command: jobmanager
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: jobmanager
+        rest.address: 0.0.0.0
+        rest.bind-address: 0.0.0.0
+        restart-strategy.type: fixed-delay
+        restart-strategy.fixed-delay.attempts: 2147483647
+        restart-strategy.fixed-delay.delay: 100ms
+        execution.failover-strategy: region
+    volumes:
+      - ./lib:/opt/flink/lib-extra:ro
+      - ./entrypoint-with-lib.sh:/entrypoint-with-lib.sh:ro
+    entrypoint: /entrypoint-with-lib.sh
+    mem_limit: 1g
+    networks:
+      - flink-net
+
+  taskmanager:
+    image: ${FLINK_IMAGE:-flink:2.2.1-java21}
+    container_name: stats-leak-tm
+    depends_on:
+      - jobmanager
+    command: taskmanager
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: jobmanager
+        taskmanager.numberOfTaskSlots: ${SLOTS:-4}
+        taskmanager.memory.process.size: 4096m
+        restart-strategy.type: fixed-delay
+        restart-strategy.fixed-delay.attempts: 2147483647
+        restart-strategy.fixed-delay.delay: 100ms
+        execution.failover-strategy: region
+        state.backend.type: rocksdb
+        state.backend.rocksdb.metrics.block-cache-hit: ${STATS_ENABLED:-true}
+        state.backend.rocksdb.metrics.block-cache-miss: ${STATS_ENABLED:-true}
+        state.backend.rocksdb.metrics.bloom-filter-useful: ${STATS_ENABLED:-true}
+        state.backend.rocksdb.metrics.bloom-filter-full-positive: ${STATS_ENABLED:-true}
+        state.backend.rocksdb.metrics.bloom-filter-full-true-positive: ${STATS_ENABLED:-true}
+        state.backend.rocksdb.metrics.bytes-read: ${STATS_ENABLED:-true}
+        state.backend.rocksdb.metrics.iter-bytes-read: ${STATS_ENABLED:-true}
+        state.backend.rocksdb.metrics.bytes-written: ${STATS_ENABLED:-true}
+        state.backend.rocksdb.metrics.compaction-read-bytes: ${STATS_ENABLED:-true}
+        state.backend.rocksdb.metrics.compaction-write-bytes: ${STATS_ENABLED:-true}
+        state.backend.rocksdb.metrics.stall-micros: ${STATS_ENABLED:-true}
+    volumes:
+      - ./lib:/opt/flink/lib-extra:ro
+      - ./entrypoint-with-lib.sh:/entrypoint-with-lib.sh:ro
+    entrypoint: /entrypoint-with-lib.sh
+    # 4 GB container with 4096m Flink budget ≈ no headroom past budget.
+    # A leak that grows past budget hits OOMKill almost immediately.
+    mem_limit: 4g
+    memswap_limit: 4g
+    networks:
+      - flink-net
+
+networks:
+  flink-net:
